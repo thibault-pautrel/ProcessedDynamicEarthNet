@@ -330,7 +330,7 @@ if __name__ == "__main__":
         test_loader=test_loader,
         device=device,
         planet_folder=args.planet_folder,
-        epochs=1,
+        epochs=30,
         lr=1e-3,
         num_classes=7
     )

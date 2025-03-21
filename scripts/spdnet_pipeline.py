@@ -495,4 +495,4 @@ if __name__ == "__main__":
 
     print(f"\n--- Training SPDNet on {planet_folder} ---")
     spdnet_model = SPDNet3BiRe(input_dim=input_dim,use_batch_norm=args.use_batch_norm)
-    train_model(spdnet_model, "spdnet", train_loader, val_loader, test_loader, device, epochs=1, lr=1e-3, planet_folder=planet_folder)
+    train_model(spdnet_model, "spdnet", train_loader, val_loader, test_loader, device, epochs=30, lr=1e-3, planet_folder=planet_folder)
