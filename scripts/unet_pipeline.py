@@ -1,5 +1,6 @@
 import os
 import glob
+import argparse
 import random
 import torch
 import torch.nn as nn
@@ -11,6 +12,17 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+############################################
+# Argument Parsing
+############################################
+import argparse
+
+parser=argparse.ArgumentParser(description="UNet Pipeline")
+parser.add_argument("--planet_folder", type=str, default="planet.10N", help="Name of the planet folder")
+args=parser.parse_args() 
+
+
 
 ############################################
 # Set seed for reproducibility
@@ -30,7 +42,7 @@ set_seed(SEED)
 # Dataset Class for U-Net
 # ------------------------------
 class UNetPatchDataset(Dataset):
-    def __init__(self, dataset_root, planet_folder='planet.13N', patch_size=256):
+    def __init__(self, dataset_root, planet_folder=args.planet_folder, patch_size=128):
         self.dataset_files = sorted(
             glob.glob(
                 os.path.join(dataset_root, 'unet', planet_folder, '**', 'pixel_dataset_*.pt'),
@@ -145,7 +157,7 @@ def display_confusion_matrix(y_true, y_pred, planet_folder, model_name, num_clas
     save_dir = "/home/thibault/ProcessedDynamicEarthNet/figures/confusion_matrices"
     os.makedirs(save_dir, exist_ok=True)
 
-    save_path = os.path.join(save_dir, f"confusion_matrix_normalized_{model_name}_{planet_folder}.png")
+    save_path = os.path.join(save_dir, f"confusion_matrix_{model_name}_{planet_folder}.png")
 
     cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
     cm_normalized = cm.astype(np.float64)
@@ -294,27 +306,30 @@ def train_model(model, model_name, train_loader, val_loader, test_loader, device
 # ------------------------------
 # Main Execution
 # ------------------------------
+
 if __name__ == "__main__":
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     dataset_root = "/media/thibault/DynEarthNet/datasets"
-    planet_folder = "planet.10N"
+    planet_folder = args.planet_folder
     model_name = "unet"
 
     print(f"\n--- U-Net Training on {planet_folder} ---")
-    unet_dataset = UNetPatchDataset(dataset_root, planet_folder=planet_folder, patch_size=256)
+    unet_dataset = UNetPatchDataset(dataset_root, planet_folder=args.planet_folder, patch_size=128)
 
     train_loader, val_loader, test_loader = get_dataloaders(unet_dataset, batch_size=4, num_workers=2)
 
-    unet_model = UNet(in_channels=4*31, num_classes=7)
+    unet_model = UNet(in_channels=4 * 31, num_classes=7)
 
     train_model(
         unet_model,
-        model_name,
-        train_loader,
-        val_loader,
-        test_loader,
-        device,
-        planet_folder=planet_folder,
+        model_name=model_name,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
+        device=device,
+        planet_folder=args.planet_folder,
         epochs=1,
         lr=1e-3,
         num_classes=7

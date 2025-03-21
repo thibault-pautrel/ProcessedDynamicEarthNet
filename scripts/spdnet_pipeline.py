@@ -22,6 +22,18 @@ from anotherspdnet.nn import BiMap, ReEig, LogEig, Vech
 from anotherspdnet.batchnorm import BatchNormSPD
 
 ########################################
+# Argument Parsing
+########################################
+
+import argparse
+
+parser=argparse.ArgumentParser(description="SPDNet pipeline with optional BatchNorm")
+parser.add_argument("--use_batch_norm", type=lambda x: str(x).lower() == 'true', default=True, help="Whether to use BatchNorm after each BiMap layer")
+parser.add_argument("--planet_folder", type=str, default="planet.10N", help="Name of the planet folder")
+args=parser.parse_args() 
+
+
+########################################
 # SEEDING
 ########################################
 def set_seed(seed):
@@ -44,7 +56,7 @@ set_seed(SEED)
 ################################################
 # SPDNet Model with BatchNorm after each BiMap
 ################################################
-class SPDNet3BiReBN(nn.Module):
+class SPDNet3BiRe(nn.Module):
     """
     A Symmetric Positive Definite Network (SPDNet) with 3 BiMap-ReEig-BatchNormSPD layers,
     followed by LogEig and Vech layers for feature extraction and a final linear classifier.
@@ -54,40 +66,45 @@ class SPDNet3BiReBN(nn.Module):
         num_classes (int): Number of target classes for classification (default is 7).
         epsilon (float): Small value added for numerical stability in ReEig (default is 1e-2).
     """
-    def __init__(self, input_dim, num_classes=7, epsilon=1e-2):
-        super(SPDNet3BiReBN, self).__init__()
-        self.layer1 = nn.Sequential(
-            BiMap(input_dim, 64, dtype=torch.float32),
-            ReEig(eps=epsilon),
-            BatchNormSPD(64, max_iter_mean=10)
-        )
-        self.layer2 = nn.Sequential(
-            BiMap(64, 32, dtype=torch.float32),
-            ReEig(eps=epsilon),
-            BatchNormSPD(32, max_iter_mean=10)
-        )
-        self.layer3 = nn.Sequential(
-            BiMap(32, 16, dtype=torch.float32),
-            ReEig(eps=epsilon),
-            BatchNormSPD(16, max_iter_mean=10)
-        )
+    def __init__(self, input_dim, num_classes=7, epsilon=1e-2, use_batch_norm=True):
+        super(SPDNet3BiRe, self).__init__()
+        self.use_batch_norm = use_batch_norm
+
+        self.bimap1 = BiMap(input_dim, 64, dtype=torch.float32)
+        self.reig1 = ReEig(eps=epsilon)
+        if self.use_batch_norm:
+            self.bn1 = BatchNormSPD(64, max_iter_mean=10)
+
+        self.bimap2 = BiMap(64, 32, dtype=torch.float32)
+        self.reig2 = ReEig(eps=epsilon)
+        if self.use_batch_norm:
+            self.bn2 = BatchNormSPD(32, max_iter_mean=10)
+
+        self.bimap3 = BiMap(32, 16, dtype=torch.float32)
+        self.reig3 = ReEig(eps=epsilon)
+        if self.use_batch_norm:
+            self.bn3 = BatchNormSPD(16, max_iter_mean=10)
+
         self.logeig = LogEig()
         self.vec = Vech()
         self.fc = nn.Linear(16 * (16 + 1) // 2, num_classes, dtype=torch.float32)
 
     def forward(self, x):
-        """
-        Forward pass of the SPDNet model.
+        x = self.bimap1(x)
+        x = self.reig1(x)
+        if self.use_batch_norm:
+            x = self.bn1(x)
 
-        Args:
-            x (torch.Tensor): Input batch of SPD matrices with shape (batch_size, dim, dim).
+        x = self.bimap2(x)
+        x = self.reig2(x)
+        if self.use_batch_norm:
+            x = self.bn2(x)
 
-        Returns:
-            torch.Tensor: Class logits of shape (batch_size, num_classes).
-        """
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
+        x = self.bimap3(x)
+        x = self.reig3(x)
+        if self.use_batch_norm:
+            x = self.bn3(x)
+
         x = self.logeig(x)
         x = self.vec(x)
         x = self.fc(x)
@@ -242,7 +259,7 @@ def display_confusion_matrix(y_true, y_pred, planet_folder, model_name, num_clas
     save_dir = "/home/thibault/ProcessedDynamicEarthNet/figures/confusion_matrices"
     os.makedirs(save_dir, exist_ok=True)
 
-    save_path = os.path.join(save_dir, f"confusion_matrix_normalized_{model_name}_{planet_folder}.png")
+    save_path = os.path.join(save_dir, f"confusion_matrix_{model_name}_{planet_folder}.png")
 
     # Compute confusion matrix
     cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
@@ -254,7 +271,7 @@ def display_confusion_matrix(y_true, y_pred, planet_folder, model_name, num_clas
     row_sums[row_sums == 0] = 1
     cm_normalized = (cm_normalized / row_sums) * 100  # Convert to percentage
 
-    # Plot using seaborn heatmap
+
     plt.figure(figsize=(10, 8))
     sns.heatmap(
         cm_normalized,
@@ -461,7 +478,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset_root = "/media/thibault/DynEarthNet/datasets"
-    planet_folder = "planet.13N"
+    planet_folder = args.planet_folder
 
     T = 31
     input_dim = 4 * T
@@ -476,6 +493,6 @@ if __name__ == "__main__":
         test_split=0.1
     )
 
-    print(f"\n--- Training SPDNet with BatchNorm on {planet_folder} ---")
-    spdnet_bn_model = SPDNet3BiReBN(input_dim=input_dim)
-    train_model(spdnet_bn_model, "spdnet_bn", train_loader, val_loader, test_loader, device, epochs=1, lr=1e-3, planet_folder=planet_folder)
+    print(f"\n--- Training SPDNet on {planet_folder} ---")
+    spdnet_model = SPDNet3BiRe(input_dim=input_dim,use_batch_norm=args.use_batch_norm)
+    train_model(spdnet_model, "spdnet", train_loader, val_loader, test_loader, device, epochs=1, lr=1e-3, planet_folder=planet_folder)
