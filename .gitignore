@@ -6,6 +6,8 @@ __pycache__/
 *$py.class
 #Ignore large folders
 checkpoints/
+#Ignore log folder
+logs/
 # Distribution / packaging
 .Python
 build/
