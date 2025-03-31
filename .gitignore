@@ -6,6 +6,10 @@ __pycache__/
 *$py.class
 #Ignore large folders
 checkpoints/
+#Ignore anotherspd module
+anotherspdnet/
+#Ignore virtual environment
+venv311/
 #Ignore log folder
 logs/
 # Distribution / packaging

@@ -1,5 +1,6 @@
 affine==2.4.0
-anotherspdnet @ file:///home/thibault/ProcessedDynamicEarthNet/anotherspdnet
+# Editable install with no version control (anotherspdnet==0.1.0)
+#-e /home/thibault/ProcessedDynamicEarthNet/anotherspdnet
 attrs==25.3.0
 certifi==2025.1.31
 click==8.1.8
@@ -42,6 +43,7 @@ rasterio==1.4.3
 scikit-learn==1.6.1
 scipy==1.15.2
 seaborn==0.13.2
+setuptools==76.0.0
 six==1.17.0
 sympy==1.13.1
 threadpoolctl==3.6.0
