@@ -32,12 +32,19 @@ def set_seed(seed=42):
 SEED = 42
 set_seed(SEED)
 
-###############################################################################
-# Analyze class distribution
-###############################################################################
-def analyze_class_distribution(labels, label_type="Data"):
-    counts = torch.bincount(labels.flatten().cpu())
-    print(f"{label_type} Label Distribution: {counts.tolist()}")
+########################################
+# Helper function to handle class imbalance
+#########################################
+
+def compute_class_weights(loader, num_classes):
+    class_counts = torch.zeros(num_classes)
+    for _, labels in loader:
+        labels = labels.view(-1)
+        counts = torch.bincount(labels, minlength=num_classes)
+        class_counts += counts
+    class_weights = class_counts.sum() / (num_classes * class_counts)
+    return class_weights
+
 
 ###############################################################################
 # UNet Model with pad_and_cat fix
@@ -213,7 +220,7 @@ class UNetCropDataset(Dataset):
 ###############################################################################
 # DataLoader Helpers
 ###############################################################################
-def get_dataloader(dataset, batch_size=2, shuffle=False, num_workers=0):
+def get_dataloader(dataset, batch_size=1, shuffle=False, num_workers=2):
     """
     Wrap a dataset into a PyTorch DataLoader.
     """
@@ -359,8 +366,6 @@ def eval_epoch(model, dataloader, criterion, device, num_classes=7):
 
     ious = calculate_iou(all_preds, all_labels, num_classes=num_classes)
     print(f"IoU per class: {ious}")
-    analyze_class_distribution(all_labels, label_type="Validation")
-    analyze_class_distribution(all_preds, label_type="Predictions")
 
     return (total_loss / len(dataloader.dataset),
             total_correct / total_pixels,
@@ -376,9 +381,10 @@ def train_model(
     test_loader,
     device,
     epochs=10,
-    lr=1e-3,
-    num_classes=7
-):
+    lr=1e-4,
+    num_classes=7,
+    weight_decay=1e-4
+    ):
     """
     Full training and evaluation loop for UNet:
     - Train+Val across epochs
@@ -388,8 +394,13 @@ def train_model(
     - Loss curve plotting
     """
     model.to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    # Compute class weights
+    class_weights=compute_class_weights(train_loader,num_classes)
+    class_weights = class_weights.to(device)
+    print("Computed class weights:", class_weights)
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    optimizer = optim.Adam(model.parameters(), lr=lr,weight_decay=weight_decay)
 
     best_val_iou = 0.0
     checkpoint_dir = "/home/thibault/ProcessedDynamicEarthNet/checkpoints"
@@ -506,7 +517,7 @@ if __name__ == "__main__":
 
     # Number of monthly time steps = 28, so channels = 4*T = 112
     T = 28  
-    model_name = "unet_crop_fixed"
+    model_name = "unet_weight_decay"
 
     # Build train, val, test datasets
     train_dataset = UNetCropDataset(
@@ -537,32 +548,35 @@ if __name__ == "__main__":
     #    Subsampling the datasets
     #===========================================
 
-    from torch.utils.data import Subset
+    #from torch.utils.data import Subset
 
     # Subsample sizes for quick sanity test
-    N_TRAIN = len(train_dataset)//2
-    N_VAL = len(val_dataset)//2
-    N_TEST = len(test_dataset)//2
-    print(f"Subsampling train/val/test datasets to {N_TRAIN}/{N_VAL}/{N_TEST} samples.")
+    #N_TRAIN = len(train_dataset)//2
+    #N_VAL = len(val_dataset)//2
+    #N_TEST = len(test_dataset)//2
+    #print(f"Subsampling train/val/test datasets to {N_TRAIN}/{N_VAL}/{N_TEST} samples.")
 
     # Use fixed random seed for reproducibility
-    rng = torch.Generator().manual_seed(42)
+    #rng = torch.Generator().manual_seed(42)
 
     # Subsample indices
-    train_subset = Subset(train_dataset, torch.randperm(len(train_dataset), generator=rng)[:N_TRAIN])
-    val_subset   = Subset(val_dataset,   torch.randperm(len(val_dataset), generator=rng)[:N_VAL])
-    test_subset  = Subset(test_dataset,  torch.randperm(len(test_dataset), generator=rng)[:N_TEST])
+    #train_subset = Subset(train_dataset, torch.randperm(len(train_dataset), generator=rng)[:N_TRAIN])
+    #val_subset   = Subset(val_dataset,   torch.randperm(len(val_dataset), generator=rng)[:N_VAL])
+    #test_subset  = Subset(test_dataset,  torch.randperm(len(test_dataset), generator=rng)[:N_TEST])
 
-    train_loader = get_dataloader(train_subset, batch_size=1, shuffle=True,  num_workers=2)
-    val_loader   = get_dataloader(val_subset,   batch_size=1, shuffle=False, num_workers=2)
-    test_loader  = get_dataloader(test_subset,  batch_size=1, shuffle=False, num_workers=2)
+    #train_loader = get_dataloader(train_subset, batch_size=1, shuffle=True,  num_workers=2)
+    #val_loader   = get_dataloader(val_subset,   batch_size=1, shuffle=False, num_workers=2)
+    #test_loader  = get_dataloader(test_subset,  batch_size=1, shuffle=False, num_workers=2)
 
+    #=======================================
+    # Full datasets
+    #=======================================
 
 
     # Create data loaders
-    #train_loader = get_dataloader(train_dataset, batch_size=2, shuffle=True,  num_workers=0)
-    #val_loader   = get_dataloader(val_dataset,   batch_size=2, shuffle=False, num_workers=0)
-    #test_loader  = get_dataloader(test_dataset,  batch_size=2, shuffle=False, num_workers=0)
+    train_loader = get_dataloader(train_dataset, batch_size=1, shuffle=True,  num_workers=2)
+    val_loader   = get_dataloader(val_dataset,   batch_size=1, shuffle=False, num_workers=2)
+    test_loader  = get_dataloader(test_dataset,  batch_size=1, shuffle=False, num_workers=2)
 
     # Instantiate UNet: in_channels=112
     unet_model = UNet(in_channels=4*T, num_classes=7)
@@ -576,6 +590,6 @@ if __name__ == "__main__":
         test_loader=test_loader,
         device=device,
         epochs=30,   
-        lr=1e-3,
-        num_classes=7
-    )
+        lr=1e-4,
+        num_classes=7,
+        weight_decay=1e-3)

@@ -57,5 +57,5 @@ def inspect_covariance_blocks_with_spd(dataset_root, max_files=10):
                     return
 
 # Use your actual path here
-dataset_path = "/media/thibault/DynEarthNet/subsampled_data/datasets/spdnet_monthly/planet.10N"
+dataset_path = "/media/thibault/DynEarthNet/subsampled_data/datasets/spdnet_monthly/train"
 inspect_covariance_blocks_with_spd(dataset_path, max_files=50)

@@ -40,6 +40,22 @@ def set_seed(seed):
 SEED = 42
 set_seed(SEED)
 
+
+
+########################################
+# Helper function to handle class imbalance
+#########################################
+
+def compute_class_weights(loader, num_classes):
+    class_counts = torch.zeros(num_classes)
+    for _, labels in loader:
+        labels = labels.view(-1)
+        counts = torch.bincount(labels, minlength=num_classes)
+        class_counts += counts
+    class_weights = class_counts.sum() / (num_classes * class_counts)
+    return class_weights
+
+
 ########################################
 # SPDNet Model
 ########################################
@@ -60,7 +76,7 @@ class SPDNet3BiRe(nn.Module):
         use_batch_norm (bool): Whether to use BatchNormSPD layers.
         p (float): Dropout probability.
     """
-    def __init__(self, input_dim, num_classes=7, epsilon=1e-4, use_batch_norm=True, p=0.3):
+    def __init__(self, input_dim, num_classes=7, epsilon=1e-3, use_batch_norm=True, p=0.5):
         super(SPDNet3BiRe, self).__init__()
         self.use_batch_norm = use_batch_norm
 
@@ -148,7 +164,7 @@ class MonthlyCovarianceDataset(Dataset):
             ...
             2019-12/ cov_label_2019-12.pt
 
-    Since you have NO planet.* subfolders, the dataset scans the tile IDs directly, then each tile's monthly folders.
+    Since there is no longer planet.* subfolders, the dataset scans the tile IDs directly, then each tile's monthly folders.
 
     For each found .pt file:
       - 'covariance': [H, W, D, D]  -> flattened to [H*W, D, D]
@@ -367,13 +383,20 @@ def train_model(
     test_loader,
     device,
     epochs=10,
-    lr=7e-3,
+    lr=7e-4,
+    weight_decay=1e-4,
     num_classes=7,
     planet_folder="multi_split"
-):
+    ):
     model.to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = RiemannianAdam(model.parameters(), lr=lr)
+    # Compute class weights
+    class_weights=compute_class_weights(train_loader,num_classes)
+    class_weights = class_weights.to(device)
+    print("Computed class weights:", class_weights)
+
+    #Define weighted loss criterion
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    optimizer = RiemannianAdam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     best_val_iou = 0.0
     checkpoint_dir = "/home/thibault/ProcessedDynamicEarthNet/checkpoints"
@@ -472,7 +495,6 @@ def train_model(
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # For example:
     train_dir = "/media/thibault/DynEarthNet/subsampled_data/datasets/spdnet_monthly/train"
     val_dir   = "/media/thibault/DynEarthNet/subsampled_data/datasets/spdnet_monthly/val"
     test_dir  = "/media/thibault/DynEarthNet/subsampled_data/datasets/spdnet_monthly/test"
@@ -527,8 +549,9 @@ if __name__ == "__main__":
 
 
 
-
-    # Full DataLoaders
+    #==========================================
+    # Full Datasets
+    #==========================================
     train_loader = get_loader(train_dataset, batch_size=1, shuffle=True,  num_workers=2)
     val_loader   = get_loader(val_dataset,   batch_size=1, shuffle=False, num_workers=2)
     test_loader  = get_loader(test_dataset,  batch_size=1, shuffle=False, num_workers=2)
@@ -543,12 +566,12 @@ if __name__ == "__main__":
 
     train_model(
         model,
-        model_name="spdnet_multi",
+        model_name="spdnet_multi_weight_decay_small",
         train_loader=train_loader,
         val_loader=val_loader,
         test_loader=test_loader,
         device=device,
-        epochs=30,       
-        lr=7e-3,        
+        epochs=20,       
+        lr=1e-4,        
         planet_folder="multi_tiles"
     )

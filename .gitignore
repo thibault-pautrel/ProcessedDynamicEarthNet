@@ -6,6 +6,8 @@ __pycache__/
 *$py.class
 #Ignore large folders
 checkpoints/
+#Ignore data folders
+subsampled_data/
 #Ignore anotherspd module
 anotherspdnet/
 #Ignore virtual environment
