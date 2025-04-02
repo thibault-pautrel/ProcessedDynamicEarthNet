@@ -594,7 +594,7 @@ def train_model(
         "recall_macro": recall_macro,
         "f1_macro": f1_macro
     }
-    save_metrics_path = f"/home/thibault/ProcessedDynamicEarthNet/test_metrics_{model_name}.json"
+    save_metrics_path = f"/home/thibault/ProcessedDynamicEarthNet/eval_metrics/test_metrics_{model_name}.json"
     with open(save_metrics_path, "w") as f:
         json.dump(metrics_dict, f, indent=2)
     print(f"Test metrics saved to {save_metrics_path}")
