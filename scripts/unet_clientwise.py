@@ -23,10 +23,10 @@ SEED = 42
 set_seed(SEED)
 
 # Point this to the directory where your monthly .pt files for a single client are stored:
-client_group_dir = "/home/thibault/ProcessedDynamicEarthNet/subsampled_data/clients/unet/mixed"
+client_group_dir = "/home/thibault/ProcessedDynamicEarthNet/subsampled_data/clients/unet/water"
 
 # Name your model run
-model_name = "unet_mixed_group"
+model_name = "unet_water_group"
 
 # U-Net expects in_channels = 4*T if T=28 daily steps each month
 T = 28

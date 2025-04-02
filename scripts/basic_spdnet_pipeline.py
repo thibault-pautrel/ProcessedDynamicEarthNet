@@ -57,6 +57,49 @@ def compute_class_weights(loader, num_classes):
 
 
 ########################################
+# Focal Loss 
+########################################
+class FocalLoss(nn.Module):
+    """
+    Focal loss for multi-class classification.
+    gamma = focusing parameter
+    alpha can be a tensor of per-class weights (similar to class_weights).
+    """
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha  # can be a 1D tensor [num_classes]
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        """
+        inputs: [N, C], raw logits
+        targets: [N]
+        """
+        log_probs = F.log_softmax(inputs, dim=1)   # shape [N, C]
+        probs = torch.exp(log_probs)               # shape [N, C]
+
+        focal_weight = (1.0 - probs) ** self.gamma # shape [N, C]
+        # Gather log_probs at target indices: shape [N, 1]
+        log_probs_target = log_probs.gather(dim=1, index=targets.unsqueeze(1)).squeeze(1)
+        focal_weight_target = focal_weight.gather(dim=1, index=targets.unsqueeze(1)).squeeze(1)
+
+        # If alpha is provided, multiply by alpha of the target class
+        if self.alpha is not None:
+            alpha_target = self.alpha[targets]     # shape [N]
+            focal_loss = -alpha_target * focal_weight_target * log_probs_target
+        else:
+            focal_loss = -focal_weight_target * log_probs_target
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
+########################################
 # SPDNet Model
 ########################################
 class SPDNet3BiRe(nn.Module):
@@ -384,7 +427,7 @@ def train_model(
     device,
     epochs=10,
     lr=7e-4,
-    weight_decay=1e-4,
+    weight_decay=1e-3,
     num_classes=7,
     planet_folder="multi_split"
     ):
@@ -394,9 +437,15 @@ def train_model(
     class_weights = class_weights.to(device)
     print("Computed class weights:", class_weights)
 
+    #Use Focal Loss with per-class alpha = class_weights
+    criterion = FocalLoss(alpha=class_weights, gamma=2.0, reduction='mean')
+
     #Define weighted loss criterion
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    #criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = RiemannianAdam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    # ReduceLROnPlateau scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=2, verbose=True)
 
     best_val_iou = 0.0
     checkpoint_dir = "/home/thibault/ProcessedDynamicEarthNet/checkpoints"
@@ -417,6 +466,9 @@ def train_model(
             f"| Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f} "
             f"| Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, mIoU: {mean_val_iou:.4f}"
         )
+
+        # Step the scheduler based on validation loss
+        scheduler.step(val_loss)
 
         if mean_val_iou > best_val_iou:
             best_val_iou = mean_val_iou
@@ -464,7 +516,7 @@ def train_model(
         "f1_macro": f1_macro
     }
 
-    save_metrics_path = f"/home/thibault/ProcessedDynamicEarthNet/test_metrics_{model_name}.json"
+    save_metrics_path = f"/home/thibault/ProcessedDynamicEarthNet/eval_metrics/test_metrics_{model_name}.json"
     with open(save_metrics_path, "w") as f:
         json.dump(metrics_dict, f, indent=2)
 
@@ -525,25 +577,25 @@ if __name__ == "__main__":
     #    Subsampling the datasets
     #===========================================
 
-    #from torch.utils.data import Subset
+    from torch.utils.data import Subset
 
     # Subsample sizes for quick sanity test
-    #N_TRAIN = len(train_dataset)//8
-    #N_VAL = len(val_dataset)//8
-    #N_TEST = len(test_dataset)//8
-    #print(f"Subsampling train/val/test datasets to {N_TRAIN}/{N_VAL}/{N_TEST} samples.")
+    N_TRAIN = len(train_dataset)//4
+    N_VAL = len(val_dataset)//4
+    N_TEST = len(test_dataset)//4
+    print(f"Subsampling train/val/test datasets to {N_TRAIN}/{N_VAL}/{N_TEST} samples.")
 
     # Use fixed random seed for reproducibility
-    #rng = torch.Generator().manual_seed(42)
+    rng = torch.Generator().manual_seed(42)
 
     # Subsample indices
-    #train_subset = Subset(train_dataset, torch.randperm(len(train_dataset), generator=rng)[:N_TRAIN])
-    #val_subset   = Subset(val_dataset,   torch.randperm(len(val_dataset), generator=rng)[:N_VAL])
-    #test_subset  = Subset(test_dataset,  torch.randperm(len(test_dataset), generator=rng)[:N_TEST])
+    train_subset = Subset(train_dataset, torch.randperm(len(train_dataset), generator=rng)[:N_TRAIN])
+    val_subset   = Subset(val_dataset,   torch.randperm(len(val_dataset), generator=rng)[:N_VAL])
+    test_subset  = Subset(test_dataset,  torch.randperm(len(test_dataset), generator=rng)[:N_TEST])
 
-    #train_loader = get_loader(train_subset, batch_size=1, shuffle=True,  num_workers=2)
-    #val_loader   = get_loader(val_subset,   batch_size=1, shuffle=False, num_workers=2)
-    #test_loader  = get_loader(test_subset,  batch_size=1, shuffle=False, num_workers=2)
+    train_loader = get_loader(train_subset, batch_size=2, shuffle=True,  num_workers=1)
+    val_loader   = get_loader(val_subset,   batch_size=2, shuffle=False, num_workers=1)
+    test_loader  = get_loader(test_subset,  batch_size=2, shuffle=False, num_workers=1)
 
 
 
@@ -552,15 +604,15 @@ if __name__ == "__main__":
     #==========================================
     # Full Datasets
     #==========================================
-    train_loader = get_loader(train_dataset, batch_size=1, shuffle=True,  num_workers=2)
-    val_loader   = get_loader(val_dataset,   batch_size=1, shuffle=False, num_workers=2)
-    test_loader  = get_loader(test_dataset,  batch_size=1, shuffle=False, num_workers=2)
+    #train_loader = get_loader(train_dataset, batch_size=1, shuffle=True,  num_workers=2)
+    #val_loader   = get_loader(val_dataset,   batch_size=1, shuffle=False, num_workers=2)
+    #test_loader  = get_loader(test_dataset,  batch_size=1, shuffle=False, num_workers=2)
 
     print("\n--- Building SPDNet Model with separate train/val/test tile directories ---")
     model = SPDNet3BiRe(
         input_dim=input_dim,
         num_classes=7,
-        epsilon=1e-3,
+        epsilon=1e-2,
         use_batch_norm=False
     )
 

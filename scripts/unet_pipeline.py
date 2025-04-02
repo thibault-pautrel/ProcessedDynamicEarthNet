@@ -45,65 +45,202 @@ def compute_class_weights(loader, num_classes):
     class_weights = class_counts.sum() / (num_classes * class_counts)
     return class_weights
 
+########################################
+# Focal Loss 
+########################################
+class FocalLoss(nn.Module):
+    """
+    Focal loss for multi-class classification.
+    gamma = focusing parameter
+    alpha can be a tensor of per-class weights (similar to class_weights).
+    """
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha  # can be a 1D tensor [num_classes]
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        """
+        inputs: [N, C], raw logits
+        targets: [N]
+        """
+        log_probs = F.log_softmax(inputs, dim=1)   # shape [N, C]
+        probs = torch.exp(log_probs)               # shape [N, C]
+
+        focal_weight = (1.0 - probs) ** self.gamma # shape [N, C]
+        # Gather log_probs at target indices: shape [N, 1]
+        log_probs_target = log_probs.gather(dim=1, index=targets.unsqueeze(1)).squeeze(1)
+        focal_weight_target = focal_weight.gather(dim=1, index=targets.unsqueeze(1)).squeeze(1)
+
+        # If alpha is provided, multiply by alpha of the target class
+        if self.alpha is not None:
+            alpha_target = self.alpha[targets]     # shape [N]
+            focal_loss = -alpha_target * focal_weight_target * log_probs_target
+        else:
+            focal_loss = -focal_weight_target * log_probs_target
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
 
 ###############################################################################
-# UNet Model with pad_and_cat fix
+# UNet Model with pad_and_cat fix + Dropout (ADDED) 
 ###############################################################################
 class UNet(nn.Module):
     """
-    A standard U-Net model for semantic segmentation with padded skip connections.
-
-    Input:
-        - x: Tensor of shape [B, C, H, W], typically [B, 112, 118, 118]
-    Output:
-        - logits: Tensor of shape [B, num_classes, H, W], typically [B, 7, 118, 118]
-
-    Skip connections are padded using `pad_and_cat` to ensure spatial alignment.
+    A standard U-Net model for semantic segmentation with padded skip connections,
+    plus dropout inserted into encoder/decoder blocks to help regularize.
     """
 
-    def __init__(self, in_channels=112, num_classes=7):
+    def __init__(self, in_channels=112, num_classes=7, dropout_p=0.2):
+        """
+        dropout_p: probability for dropout in each encoder/decoder block
+        """
         super(UNet, self).__init__()
-        self.encoder1 = self.conv_block(in_channels, 64)
-        self.encoder2 = self.conv_block(64, 128)
-        self.encoder3 = self.conv_block(128, 256)
-        self.encoder4 = self.conv_block(256, 512)
+
+        # We pass dropout_p to each conv_block
+        self.encoder1 = self.conv_block(in_channels, 64, dropout_p)
+        self.encoder2 = self.conv_block(64, 128, dropout_p)
+        self.encoder3 = self.conv_block(128, 256, dropout_p)
+        self.encoder4 = self.conv_block(256, 512, dropout_p)
 
         self.pool = nn.MaxPool2d(kernel_size=2)
 
-        self.middle = self.conv_block(512, 1024)
+        self.middle = self.conv_block(512, 1024, dropout_p)
 
         self.up4 = self.up_conv(1024, 512)
-        self.dec4 = self.conv_block(1024, 512)
+        self.dec4 = self.conv_block(1024, 512, dropout_p)
 
         self.up3 = self.up_conv(512, 256)
-        self.dec3 = self.conv_block(512, 256)
+        self.dec3 = self.conv_block(512, 256, dropout_p)
 
         self.up2 = self.up_conv(256, 128)
-        self.dec2 = self.conv_block(256, 128)
+        self.dec2 = self.conv_block(256, 128, dropout_p)
 
         self.up1 = self.up_conv(128, 64)
-        self.dec1 = self.conv_block(128, 64)
+        self.dec1 = self.conv_block(128, 64, dropout_p)
 
         self.final_conv = nn.Conv2d(64, num_classes, kernel_size=1)
 
-    def conv_block(self, in_channels, out_channels):
+    def conv_block(self, in_channels, out_channels, dropout_p=0.2):
+        """
+        Two conv layers each followed by BN + ReLU, plus a dropout layer in between.
+        """
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout_p),  # ADDED dropout
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout_p)   # ADDED dropout
         )
 
     def up_conv(self, in_channels, out_channels):
         return nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
 
     def pad_and_cat(self, enc_feat, dec_feat):
+        diffY = enc_feat.size(2) - dec_feat.size(2)
+        diffX = enc_feat.size(3) - dec_feat.size(3)
+        dec_feat = F.pad(
+            dec_feat,
+            [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2]
+        )
+        return torch.cat([enc_feat, dec_feat], dim=1)
+
+    def forward(self, x):
+        # Encoder
+        e1 = self.encoder1(x)
+        e2 = self.encoder2(self.pool(e1))
+        e3 = self.encoder3(self.pool(e2))
+        e4 = self.encoder4(self.pool(e3))
+
+        # Middle
+        m = self.middle(self.pool(e4))
+
+        # Decoder
+        d4 = self.up4(m)
+        d4 = self.pad_and_cat(e4, d4)
+        d4 = self.dec4(d4)
+
+        d3 = self.up3(d4)
+        d3 = self.pad_and_cat(e3, d3)
+        d3 = self.dec3(d3)
+
+        d2 = self.up2(d3)
+        d2 = self.pad_and_cat(e2, d2)
+        d2 = self.dec2(d2)
+
+        d1 = self.up1(d2)
+        d1 = self.pad_and_cat(e1, d1)
+        d1 = self.dec1(d1)
+
+        return self.final_conv(d1)
+
+
+###############################################################################
+# Lighter UNet (ADDED)
+###############################################################################
+class UNetLite(nn.Module):
+    """
+    A 'lighter' U-Net variant with fewer feature maps to reduce capacity 
+    (and thus help prevent overfitting on smaller datasets).
+    """
+
+    def __init__(self, in_channels=112, num_classes=7, dropout_p=0.2):
         """
-        Pad dec_feat (the upsampled decoder feature map) 
-        so it matches enc_feat's spatial size, then concat along channels.
+        We use half the channels (32→64→128→256→512) instead of (64→128→256→512→1024).
         """
+        super(UNetLite, self).__init__()
+
+        # Encoders
+        self.encoder1 = self.conv_block(in_channels, 32, dropout_p)
+        self.encoder2 = self.conv_block(32, 64, dropout_p)
+        self.encoder3 = self.conv_block(64, 128, dropout_p)
+        self.encoder4 = self.conv_block(128, 256, dropout_p)
+
+        self.pool = nn.MaxPool2d(kernel_size=2)
+
+        # Middle
+        self.middle = self.conv_block(256, 512, dropout_p)
+
+        # Decoders
+        self.up4 = self.up_conv(512, 256)
+        self.dec4 = self.conv_block(512, 256, dropout_p)
+
+        self.up3 = self.up_conv(256, 128)
+        self.dec3 = self.conv_block(256, 128, dropout_p)
+
+        self.up2 = self.up_conv(128, 64)
+        self.dec2 = self.conv_block(128, 64, dropout_p)
+
+        self.up1 = self.up_conv(64, 32)
+        self.dec1 = self.conv_block(64, 32, dropout_p)
+
+        self.final_conv = nn.Conv2d(32, num_classes, kernel_size=1)
+
+    def conv_block(self, in_channels, out_channels, dropout_p=0.2):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout_p),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout_p)
+        )
+
+    def up_conv(self, in_channels, out_channels):
+        return nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
+
+    def pad_and_cat(self, enc_feat, dec_feat):
         diffY = enc_feat.size(2) - dec_feat.size(2)
         diffX = enc_feat.size(3) - dec_feat.size(3)
         dec_feat = F.pad(
@@ -142,27 +279,14 @@ class UNet(nn.Module):
         return self.final_conv(d1)
 
 ###############################################################################
-# UNet Dataset that looks for .pt files in a single directory
+# UNet Dataset with data augmentation 
 ###############################################################################
 class UNetCropDataset(Dataset):
     """
     Loads and processes monthly pixel datasets from .pt files into UNet-ready tensors
     from a single directory (and its subdirectories).
 
-    Each sample:
-        - features: [C, 118, 118], where C = 4 * T = 112 (i.e. considering 28 days/month)
-        - labels:   [118, 118] (integer class indices)
-
-    Steps:
-        - Permute feature tensor from [H, W, C] to [C, H, W]
-        - Crop top-left to fixed shape [118, 118]
-        - Slice input channels to 112 if needed (e.g. from 124→112)
-
-    Args:
-        split_dir (str): Directory containing the .pt files for train/val/test.
-        pattern (str): Filename glob for the monthly data, e.g. 'pixel_dataset_*.pt'
-        final_H/W (int): Final spatial resolution (crop target), default 118×118
-        max_T (int): Number of time steps (4×max_T = #channels), default 28 → 112 channels
+    We add random flips and random 90° rotations for data augmentation if 'augment=True'.
     """
 
     def __init__(
@@ -171,7 +295,8 @@ class UNetCropDataset(Dataset):
         pattern="pixel_dataset_*.pt",
         final_H=118,
         final_W=118,
-        max_T=28
+        max_T=28,
+        augment=False  # ADDED: augmentation flag
     ):
         super().__init__()
         self.final_H = final_H
@@ -180,6 +305,7 @@ class UNetCropDataset(Dataset):
         self.files = sorted(
             glob.glob(os.path.join(split_dir, "**", pattern), recursive=True)
         )
+        self.augment = augment  # ADDED
         if not self.files:
             raise ValueError(
                 f"No .pt files found under {split_dir} with pattern={pattern}"
@@ -215,15 +341,32 @@ class UNetCropDataset(Dataset):
         if C > self.max_C:
             feats = feats[:self.max_C, :, :]  # => [112,118,118]
 
+        # -------------------------
+        # ADDED DATA AUGMENTATION
+        # -------------------------
+        if self.augment:
+            # Random horizontal flip
+            if random.random() < 0.5:
+                feats = torch.flip(feats, dims=[2])  # Flip W dimension
+                labs  = torch.flip(labs,  dims=[1])
+
+            # Random vertical flip
+            if random.random() < 0.5:
+                feats = torch.flip(feats, dims=[1])  # Flip H dimension
+                labs  = torch.flip(labs,  dims=[0])
+
+            # Random 90° rotations (0, 90, 180, 270)
+            k = random.randint(0, 3)  # 0..3
+            if k > 0:
+                feats = torch.rot90(feats, k, dims=[1, 2])  # rotate spatial dims
+                labs  = torch.rot90(labs,  k, dims=[0, 1])
+
         return feats, labs
 
 ###############################################################################
 # DataLoader Helpers
 ###############################################################################
 def get_dataloader(dataset, batch_size=1, shuffle=False, num_workers=2):
-    """
-    Wrap a dataset into a PyTorch DataLoader.
-    """
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -233,7 +376,7 @@ def get_dataloader(dataset, batch_size=1, shuffle=False, num_workers=2):
     )
 
 ###############################################################################
-# Metrics
+# Metrics (same as before)
 ###############################################################################
 def calculate_iou(preds, labels, num_classes=7):
     ious = []
@@ -301,13 +444,6 @@ def plot_loss_curves(train_losses, val_losses, model_name, split_tag):
 # Training + Evaluation
 ###############################################################################
 def train_epoch(model, dataloader, criterion, optimizer, device):
-    """
-    Trains the model for one epoch using standard cross-entropy loss.
-
-    Inputs per batch:
-        - feats: [B, 112, 118, 118]
-        - labels: [B, 118, 118]
-    """
     model.train()
     total_loss, total_correct, total_pixels = 0.0, 0, 0
 
@@ -331,16 +467,6 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
     return avg_loss, avg_acc
 
 def eval_epoch(model, dataloader, criterion, device, num_classes=7):
-    """
-    Evaluates the model on a split (val/test).
-
-    Returns:
-        - avg_loss
-        - avg_acc
-        - ious (per-class)
-        - all_preds (flattened)
-        - all_labels (flattened)
-    """
     model.eval()
     total_loss, total_correct, total_pixels = 0.0, 0, 0
     all_preds, all_labels = [], []
@@ -385,22 +511,18 @@ def train_model(
     num_classes=7,
     weight_decay=1e-4
     ):
-    """
-    Full training and evaluation loop for UNet:
-    - Train+Val across epochs
-    - Save best checkpoint (by mIoU on val)
-    - Final test evaluation
-    - Confusion matrix, classification report, AUC
-    - Loss curve plotting
-    """
     model.to(device)
-    # Compute class weights
-    class_weights=compute_class_weights(train_loader,num_classes)
-    class_weights = class_weights.to(device)
+    class_weights = compute_class_weights(train_loader, num_classes).to(device)
     print("Computed class weights:", class_weights)
 
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = optim.Adam(model.parameters(), lr=lr,weight_decay=weight_decay)
+    # Optionally use FocalLoss or standard CrossEntropy
+    criterion = FocalLoss(alpha=class_weights, gamma=2.0, reduction='mean')
+    #criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.2, patience=2, verbose=True
+    )
 
     best_val_iou = 0.0
     checkpoint_dir = "/home/thibault/ProcessedDynamicEarthNet/checkpoints"
@@ -422,6 +544,9 @@ def train_model(
             f"| Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, mIoU: {mean_val_iou:.4f}"
         )
 
+        # Step the scheduler based on validation loss
+        scheduler.step(val_loss)
+
         if mean_val_iou > best_val_iou:
             best_val_iou = mean_val_iou
             save_path = os.path.join(checkpoint_dir, f"{model_name}_best.pt")
@@ -438,28 +563,24 @@ def train_model(
         f"mIoU: {np.nanmean(test_ious):.4f}"
     )
 
-    # Confusion matrix & classification report
     display_confusion_matrix(
         test_labels.numpy(), test_preds.numpy(),
-        split_tag="test",  # label the confusion matrix figure
+        split_tag="test",
         model_name=model_name, 
         num_classes=num_classes
     )
     print(classification_report(
         test_labels.numpy(), test_preds.numpy(), zero_division=0
     ))
-    # --- Save final test metrics to JSON ---
-    import json
 
-    #Convert classification_report into a dict so we can extract macro precision/recall/f1
+    # Save final test metrics
+    import json
     report_dict = classification_report(
         test_labels.numpy(),
         test_preds.numpy(),
         zero_division=0,
         output_dict=True
     )
-
-    # 2) Gather metrics of interest
     test_accuracy = test_acc
     test_mIoU = float(np.nanmean(test_ious))
     precision_macro = report_dict["macro avg"]["precision"]
@@ -473,12 +594,9 @@ def train_model(
         "recall_macro": recall_macro,
         "f1_macro": f1_macro
     }
-
-    # Save to JSON in your desired directory
     save_metrics_path = f"/home/thibault/ProcessedDynamicEarthNet/test_metrics_{model_name}.json"
     with open(save_metrics_path, "w") as f:
         json.dump(metrics_dict, f, indent=2)
-
     print(f"Test metrics saved to {save_metrics_path}")
 
     # Attempt multi-class AUC
@@ -489,20 +607,20 @@ def train_model(
             for feats, _ in test_loader:
                 feats = feats.to(device)
                 out = model(feats)
-                sm = torch.softmax(out, dim=1)  # [B,7,118,118]
-                sm = sm.permute(0,2,3,1).reshape(-1, num_classes)  # => [B*118*118,7]
+                sm = torch.softmax(out, dim=1)  # [B,7,H,W]
+                sm = sm.permute(0, 2, 3, 1).reshape(-1, num_classes)
                 probs.append(sm.cpu())
         probs = torch.cat(probs, dim=0).numpy()
 
-        test_labels_np = test_labels.numpy()  # shape [B*118*118]
-        one_hot = np.eye(num_classes)[test_labels_np]  # [N,7]
+        test_labels_np = test_labels.numpy()
+        one_hot = np.eye(num_classes)[test_labels_np]
         auc_val = roc_auc_score(one_hot, probs, average='macro', multi_class='ovr')
         print(f"Multiclass AUC (macro, OVR): {auc_val:.4f}")
     except Exception as e:
         print("AUC could not be computed:", e)
 
-    # Plot loss curves
     plot_loss_curves(train_losses, val_losses, model_name, "train_val")
+
 
 ###############################################################################
 # Main
@@ -515,17 +633,17 @@ if __name__ == "__main__":
     val_dir   = "/media/thibault/DynEarthNet/subsampled_data/datasets/unet/val"
     test_dir  = "/media/thibault/DynEarthNet/subsampled_data/datasets/unet/test"
 
-    # Number of monthly time steps = 28, so channels = 4*T = 112
-    T = 28  
-    model_name = "unet_weight_decay"
+    T = 28  # => channels = 4*T = 112
 
     # Build train, val, test datasets
+    # (ADDED) set 'augment=True' for training set only:
     train_dataset = UNetCropDataset(
         split_dir=train_dir,
         pattern="pixel_dataset_*.pt",
         final_H=118,
         final_W=118,
-        max_T=T
+        max_T=T,
+        augment=True    # random flips + random 90° rotation
     )
 
     val_dataset = UNetCropDataset(
@@ -533,7 +651,8 @@ if __name__ == "__main__":
         pattern="pixel_dataset_*.pt",
         final_H=118,
         final_W=118,
-        max_T=T
+        max_T=T,
+        augment=False   # no augmentation on validation
     )
 
     test_dataset = UNetCropDataset(
@@ -541,32 +660,35 @@ if __name__ == "__main__":
         pattern="pixel_dataset_*.pt",
         final_H=118,
         final_W=118,
-        max_T=T
+        max_T=T,
+        augment=False   # no augmentation on test
     )
 
     #==========================================
     #    Subsampling the datasets
     #===========================================
 
-    #from torch.utils.data import Subset
+    from torch.utils.data import Subset
 
     # Subsample sizes for quick sanity test
-    #N_TRAIN = len(train_dataset)//2
-    #N_VAL = len(val_dataset)//2
-    #N_TEST = len(test_dataset)//2
-    #print(f"Subsampling train/val/test datasets to {N_TRAIN}/{N_VAL}/{N_TEST} samples.")
+    N_TRAIN = len(train_dataset)//4
+    N_VAL = len(val_dataset)//4
+    N_TEST = len(test_dataset)//4
+    print(f"Subsampling train/val/test datasets to {N_TRAIN}/{N_VAL}/{N_TEST} samples.")
 
     # Use fixed random seed for reproducibility
-    #rng = torch.Generator().manual_seed(42)
+    rng = torch.Generator().manual_seed(42)
+
+    model_name = "unet_weight_decay_small"
 
     # Subsample indices
-    #train_subset = Subset(train_dataset, torch.randperm(len(train_dataset), generator=rng)[:N_TRAIN])
-    #val_subset   = Subset(val_dataset,   torch.randperm(len(val_dataset), generator=rng)[:N_VAL])
-    #test_subset  = Subset(test_dataset,  torch.randperm(len(test_dataset), generator=rng)[:N_TEST])
+    train_subset = Subset(train_dataset, torch.randperm(len(train_dataset), generator=rng)[:N_TRAIN])
+    val_subset   = Subset(val_dataset,   torch.randperm(len(val_dataset), generator=rng)[:N_VAL])
+    test_subset  = Subset(test_dataset,  torch.randperm(len(test_dataset), generator=rng)[:N_TEST])
 
-    #train_loader = get_dataloader(train_subset, batch_size=1, shuffle=True,  num_workers=2)
-    #val_loader   = get_dataloader(val_subset,   batch_size=1, shuffle=False, num_workers=2)
-    #test_loader  = get_dataloader(test_subset,  batch_size=1, shuffle=False, num_workers=2)
+    train_loader = get_dataloader(train_subset, batch_size=4, shuffle=True,  num_workers=2)
+    val_loader   = get_dataloader(val_subset,   batch_size=4, shuffle=False, num_workers=2)
+    test_loader  = get_dataloader(test_subset,  batch_size=4, shuffle=False, num_workers=2)
 
     #=======================================
     # Full datasets
@@ -574,22 +696,45 @@ if __name__ == "__main__":
 
 
     # Create data loaders
-    train_loader = get_dataloader(train_dataset, batch_size=1, shuffle=True,  num_workers=2)
-    val_loader   = get_dataloader(val_dataset,   batch_size=1, shuffle=False, num_workers=2)
-    test_loader  = get_dataloader(test_dataset,  batch_size=1, shuffle=False, num_workers=2)
+    #train_loader = get_dataloader(train_dataset, batch_size=4, shuffle=True,  num_workers=2)
+    #val_loader   = get_dataloader(val_dataset,   batch_size=4, shuffle=False, num_workers=2)
+    #test_loader  = get_dataloader(test_dataset,  batch_size=4, shuffle=False, num_workers=2)
 
-    # Instantiate UNet: in_channels=112
-    unet_model = UNet(in_channels=4*T, num_classes=7)
 
-    # Train and evaluate
+    # -------------------------------------------------------------------
+    # Original U-Net with dropout 
+    # -------------------------------------------------------------------
+    #model_name = "unet_dropout_aug"
+    #unet_model = UNet(in_channels=4*T, num_classes=7, dropout_p=0.2)
+
+    #train_model(
+    #    model=unet_model,
+    #    model_name=model_name,
+    #    train_loader=train_loader,
+    #    val_loader=val_loader,
+    #    test_loader=test_loader,
+    #    device=device,
+    #   epochs=20,
+    #   lr=1e-4,
+    #   num_classes=7,
+    #    weight_decay=1e-4
+    #)
+
+    # -------------------------------------------------------------------
+    # Lighter U-Net 
+    # -------------------------------------------------------------------
+    model_name_lite = "unet_lite_dropout_aug"
+    unet_lite_model = UNetLite(in_channels=4*T, num_classes=7, dropout_p=0.8)
+
     train_model(
-        model=unet_model,
-        model_name=model_name,
+        model=unet_lite_model,
+        model_name=model_name_lite,
         train_loader=train_loader,
         val_loader=val_loader,
         test_loader=test_loader,
         device=device,
-        epochs=30,   
+        epochs=20,
         lr=1e-4,
         num_classes=7,
-        weight_decay=1e-3)
+        weight_decay=5e-4
+    )

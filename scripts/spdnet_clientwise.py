@@ -21,14 +21,14 @@ from basic_spdnet_pipeline import (
 SEED = 42
 set_seed(SEED)
 
-client_group_dir = "/home/thibault/ProcessedDynamicEarthNet/subsampled_data/clients/spdnet_monthly/mixed"
-model_name = "spdnet_mixed_group"
-planet_folder = "mixed"
+client_group_dir = "/home/thibault/ProcessedDynamicEarthNet/subsampled_data/clients/spdnet_monthly/water"
+model_name = "spdnet_water_group"
+planet_folder = "water"
 
 T = 28
 input_dim = 4 * T
-batch_size = 1
-num_workers = 2
+batch_size = 2
+num_workers = 1
 epochs = 15
 lr = 1e-4
 num_classes = 7
