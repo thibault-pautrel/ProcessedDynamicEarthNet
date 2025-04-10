@@ -308,6 +308,91 @@ def inspect_and_display_2018_01_labels_unet(save_path=None):
         plt.show()
     plt.close(fig)
 
+
+def inspect_all_2018_01_labels_full_data(base_unet_dir, save_dir, alpha=0.4):
+    """
+    Inspects and visualizes 2018-01 label overlays for all tiles in the full_data/datasets/unet folder.
+
+    Args:
+        base_unet_dir (str): Path to the base directory with tile_id folders.
+        save_dir (str): Directory to save the generated figure.
+        alpha (float): Transparency for overlaying labels.
+
+    Returns:
+        None
+    """
+    tile_folders = sorted(glob.glob(os.path.join(base_unet_dir, '*')))
+    if not tile_folders:
+        print(f"[ERROR] No tiles found in {base_unet_dir}")
+        return
+
+    all_images = []
+
+    for tile_path in tile_folders:
+        tile_id = os.path.basename(tile_path)
+        pt_path = os.path.join(tile_path, "2018-01", "pixel_dataset_2018-01.pt")
+        if not os.path.isfile(pt_path):
+            continue
+
+        try:
+            data = torch.load(pt_path)
+            labels = data["labels"]
+        except Exception as e:
+            print(f"[ERROR] Failed to load {pt_path}: {e}")
+            continue
+
+        labels_np = labels.cpu().numpy() if isinstance(labels, torch.Tensor) else np.array(labels)
+
+        # Top-2 class summary
+        unique, counts = np.unique(labels_np, return_counts=True)
+        sorted_classes = sorted(zip(unique, counts), key=lambda x: x[1], reverse=True)
+        top2 = sorted_classes[:2]
+        top2_str = "Top: " + ", ".join(f"{cls}" for cls, _ in top2)
+
+        # Create color image
+        color_map = {
+            0: (127/255, 127/255, 127/255),
+            1: (189/255, 189/255, 34/255),
+            2: (51/255, 204/255, 51/255),
+            3: (0/255, 0/255, 153/255),
+        }
+        h, w = labels_np.shape
+        color_img = np.zeros((h, w, 3), dtype=np.float32)
+        for cls, color in color_map.items():
+            mask = labels_np == cls
+            color_img[mask] = color
+
+        all_images.append((tile_id, color_img, top2_str))
+
+    if not all_images:
+        print("[INFO] No 2018-01 labels found.")
+        return
+
+    n = len(all_images)
+    cols = 5
+    rows = (n + cols - 1) // cols
+
+    fig, axs = plt.subplots(rows, cols, figsize=(cols * 4, rows * 4))
+    axs = axs.flatten()
+
+    for i in range(rows * cols):
+        ax = axs[i]
+        if i < n:
+            tile_name, img, label_text = all_images[i]
+            ax.imshow(img)
+            ax.set_title(f"{tile_name}\n{label_text}", fontsize=10)
+        ax.axis('off')
+
+    plt.tight_layout()
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        out_path = os.path.join(save_dir, "full_data_2018-01_labels_grid.png")
+        plt.savefig(out_path, dpi=300)
+        print(f"[INFO] Saved label grid to {out_path}")
+    else:
+        plt.show()
+    plt.close(fig)
+
 if __name__ == "__main__":
     # Uncomment one of the following calls depending on what you want to run.
     
@@ -321,5 +406,6 @@ if __name__ == "__main__":
     # )
     
     # To run the new function for unet 2018-01 labels, arranged in 3 columns (train, test, val):
-    save_path = "/home/thibault/ProcessedDynamicEarthNet/figures/train_val_test_labels_2018-01.png"
-    inspect_and_display_2018_01_labels_unet(save_path=save_path)
+    base_unet_dir = "/media/thibault/DynEarthNet/full_data/datasets"
+    save_dir = "/home/thibault/ProcessedDynamicEarthNet/figures/full_data_labels/"
+    inspect_all_2018_01_labels_full_data(base_unet_dir, save_dir)
